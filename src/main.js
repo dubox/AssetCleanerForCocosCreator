@@ -27,8 +27,11 @@ let parseCommand = function(cmd) {
     }
 
     switch (cmd) {
+        case '-rm':
+            AssetCleaner.start(sourceFile, destFile ,true);
+            break;
         case '-clean':
-            AssetCleaner.start(sourceFile, destFile);
+            AssetCleaner.start(sourceFile, destFile ,false);
             break;
         case '-size':
             AssetSize.start(sourceFile, destFile);

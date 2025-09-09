@@ -1,3 +1,8 @@
+## 更新说明
+- 新增 -rm 参数执行删除；
+- 支持删除spine资源；
+- 支持fnt字体资源；
+
 # AssetCleanerForCocosCreator
 **简介：一个基于Node.js的CocosCreator项目资源清理工具，自动化统计有哪些资源未使用，以及各类型资源的占比情况，从而帮助减小包体。**
 

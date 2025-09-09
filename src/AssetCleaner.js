@@ -27,12 +27,14 @@ let AssetCleaner = {
     destMap: null,
     handleMap: null,
     resourcesDir: 'resources',
+    isRm: false,
 
-    start(sourceFile, destFile) {
+    start(sourceFile, destFile ,isRm) {
         if (!sourceFile || sourceFile.length <= 0 || !destFile || destFile.length <= 0) {
             console.error('Cleaner: invalid source or dest');
             return;
         }
+        this.isRm = isRm;
 
         this.sourceMap = new Map();
         this.destMap = new Map();
@@ -51,6 +53,217 @@ let AssetCleaner = {
         let outStr = outStr1 + '\n' + outStr2;
         FileHelper.writeFile(destFile, outStr);
     },
+     // 递归查找指定目录下所有资源
+    lookupAssetDir(srcDir, callback) {
+        if (!srcDir || !fs.existsSync(srcDir)) {    
+            console.error("AssetCleaner: invalid srcDir=" + srcDir);
+            return;
+        }
+
+        let files = fs.readdirSync(srcDir);
+        if(files.length<=0)
+        {
+            console.log("try to delete empty dir :",srcDir)
+            fs.rmdirSync(srcDir);
+            return;
+        }
+        for (let i = 0, len = files.length; i < len; i++) {
+            let file = files[i];
+            let curPath = path.join(srcDir, file);
+
+            // 如果该文件已处理过则直接跳过
+            if (this.handleMap.has(curPath)) {
+                continue;
+            }
+
+            let stats = fs.statSync(curPath);
+            if (stats.isDirectory()) {
+                this.lookupAssetDir(curPath);
+                continue;
+            }
+
+            let data = null;
+            let uuid = [];
+            let pathObj = path.parse(curPath);
+            // Sprine资源
+            if (curPath.includes('.json.meta')) {
+                if (curPath.indexOf(this.resourcesDir) < 0) {
+                        uuid = this.getFileUUID(curPath, pathObj, ResType.Spine);
+                        this.sourceMap.set(curPath, { uuid, type:ResType.Spine, size:stats.size });
+                    }
+
+                data = FileHelper.getFileString(curPath);
+                this.destMap.set(curPath, { data, type: ResType.Spine });
+                continue
+            }
+            // 针对各类型文件做相应处理
+            switch (pathObj.ext) {
+                case '.js':
+                case '.ts':
+                    data = FileHelper.getFileString(curPath);
+                    this.destMap.set(curPath, { data, type:ResType.Code });
+                    break;
+
+                case '.prefab':
+                    uuid = this.getFileUUID(curPath, pathObj, ResType.Prefab);
+                    data = { uuid, type:ResType.Prefab, size:stats.size, name:'' };
+                    if (curPath.indexOf(this.resourcesDir) >= 0) {
+                        data.name = pathObj.name; // resources下文件需按文件名在代码中查找
+                    }
+                    this.sourceMap.set(curPath, data);
+                    
+                    data = FileHelper.getFileString(curPath);
+                    this.destMap.set(curPath, { data, type:ResType.Prefab });
+                    break;
+
+                case '.anim':
+                    if (curPath.indexOf(this.resourcesDir) < 0) { // 暂时排除resources下.anim
+                        uuid = this.getFileUUID(curPath, pathObj, ResType.Anim);
+                        this.sourceMap.set(curPath, { uuid, type:ResType.Anim, size:stats.size });
+                    }
+
+                    data = FileHelper.getFileString(curPath);
+                    this.destMap.set(curPath, { data, type:ResType.Anim });
+                    break;
+
+                case '.fnt':
+                    if (curPath.indexOf(this.resourcesDir) < 0) { // 暂时排除resources下.anim
+                        uuid = this.getFileUUID(curPath, pathObj, ResType.Fnt);
+                        this.sourceMap.set(curPath, { uuid, type:ResType.Fnt, size:stats.size });
+                    }
+
+                    data = FileHelper.getFileString(curPath);
+                    this.destMap.set(curPath, { data, type:ResType.Fnt });
+                    break;
+
+                case '.fire':
+                    data = FileHelper.getFileString(curPath);
+                    this.destMap.set(curPath, { data, type:ResType.Fire });
+                    break;
+                    
+                case '.png':
+                case '.PNG':
+                case '.jpg':
+                case '.webp':
+                    if (curPath.indexOf(this.resourcesDir) >= 0) { // 暂时不处理resources下图片
+                        break;
+                    }
+                    let type = this.getImageType(curPath, pathObj);
+                    uuid = this.getFileUUID(curPath, pathObj, type);
+                    type === ResType.Image && this.sourceMap.set(curPath, { uuid, type:type, size:stats.size ,name:pathObj.name});
+                    break;
+
+                default:
+                    break;
+            }
+        }
+    },
+
+    // UUID和文件逐个比较，返回结果汇总
+    compareAssets() {
+        let noBindMap = new Map();
+        let noLoadMap = new Map();
+        
+        // 如果源UUID在所有目标资源都未找到，则说明源UUID对应的文件未被引用
+        for (let [srcPath, srcData] of this.sourceMap.entries()) {
+            let isBind = false;
+            let isCodeLoad = false;
+            let bDynamic = (srcPath.indexOf(this.resourcesDir) >= 0);
+            
+            isBind = this.findAssetByUUID(srcPath, srcData);
+            if (bDynamic) {
+                isCodeLoad = this.findAssetByName(srcPath, srcData);
+            }
+            if (!isBind && !isCodeLoad) {
+                let files = noBindMap.get(srcData.type);
+                if (!files) {
+                    files = [];
+                    noBindMap.set(srcData.type, files);
+                }
+                files.push({ path:srcPath, size:srcData.size });
+
+                if(this.isRm){
+
+                    console.log('try to delete file: ' + srcPath);
+                    if(srcData.type == ResType.Spine){
+                        //删除文件所在目录
+                        let dirPath = path.dirname(srcPath);
+                        this.deleteDirectoryRecursive(dirPath);
+                    }
+                    else
+                    fs.unlinkSync(srcPath)
+                
+                }
+                
+            } else if (bDynamic && isBind && !isCodeLoad) {
+                let files = noLoadMap.get(srcData.type);
+                if (!files) {
+                    files = [];
+                    noLoadMap.set(srcData.type, files);
+                }
+                files.push({ path:srcPath, size:srcData.size });
+                
+                if(this.isRm){
+                    console.log('try to delete file: ' + srcPath);
+                    fs.unlinkSync(srcPath)
+                }
+                
+            }
+        }
+
+        return { noBindMap, noLoadMap };
+    },
+
+    
+    // 根据源UUID在目标资源中查找
+    findAssetByUUID(srcPath, srcData) {
+        let bFound = false;
+        if (!srcPath || !srcData) {
+            return bFound;
+        }
+        for (let [destPath, destData] of this.destMap.entries()) {
+            if (srcPath == destPath || ResType.Code === destData.type) {
+                continue;
+            }
+            if (!!srcData && !!srcData.uuid) {  
+                for (let i = 0, len = srcData.uuid.length; i < len; i++) {
+                    let uuid = srcData.uuid[i];
+                    if (destData.data.indexOf(uuid) >= 0) {
+                        bFound = true;
+                        return bFound; // 源UUID数组只要有一个被引用，即代表源文件被引用了，无需继续查找
+                    }
+                    if(srcData.name && destData.data.indexOf(srcData.name) >= 0){
+                        bFound = true;
+                        return bFound;
+                    }
+                }
+            }
+        }
+        return bFound;
+    },
+
+    // 根据源文件名在目标资源中查找
+    // 主要是搜索代码中动态调用的.prefab、.anim
+    findAssetByName(srcPath, srcData) {
+        let bFound = false;
+        if (!srcPath || !srcData) {
+            return bFound;
+        }
+        for (let [destPath, destData] of this.destMap.entries()) {
+            // 目标资源必须是代码文件
+            if (srcPath == destPath || ResType.Code !== destData.type) { 
+                continue;
+            }
+            if (!!srcData && !!srcData.name && srcData.name.length > 0) {
+                if (destData.data.indexOf(srcData.name) >= 0) {
+                    bFound = true;
+                    break;
+                }
+            }
+        }
+        return bFound;
+    },
+
 
     getSortedResult(outStr, outMap, srcDir, isDelete) {
         let totalCount = 0;
@@ -128,171 +341,7 @@ let AssetCleaner = {
         return outStr;
     },
 
-    // UUID和文件逐个比较，返回结果汇总
-    compareAssets() {
-        let noBindMap = new Map();
-        let noLoadMap = new Map();
-        
-        // 如果源UUID在所有目标资源都未找到，则说明源UUID对应的文件未被引用
-        for (let [srcPath, srcData] of this.sourceMap.entries()) {
-            let isBind = false;
-            let isCodeLoad = false;
-            let bDynamic = (srcPath.indexOf(this.resourcesDir) >= 0);
-            
-            isBind = this.findAssetByUUID(srcPath, srcData);
-            if (bDynamic) {
-                isCodeLoad = this.findAssetByName(srcPath, srcData);
-            }
-
-            if (!isBind && !isCodeLoad) {
-                let files = noBindMap.get(srcData.type);
-                if (!files) {
-                    files = [];
-                    noBindMap.set(srcData.type, files);
-                }
-                files.push({ path:srcPath, size:srcData.size });
-            } else if (bDynamic && isBind && !isCodeLoad) {
-                let files = noLoadMap.get(srcData.type);
-                if (!files) {
-                    files = [];
-                    noLoadMap.set(srcData.type, files);
-                }
-                files.push({ path:srcPath, size:srcData.size });
-            }
-        }
-
-        return { noBindMap, noLoadMap };
-    },
-
-    // 根据源UUID在目标资源中查找
-    findAssetByUUID(srcPath, srcData) {
-        let bFound = false;
-        if (!srcPath || !srcData) {
-            return bFound;
-        }
-        for (let [destPath, destData] of this.destMap.entries()) {
-            if (srcPath == destPath || ResType.Code === destData.type) {
-                continue;
-            }
-            if (!!srcData && !!srcData.uuid) {  
-                for (let i = 0, len = srcData.uuid.length; i < len; i++) {
-                    let uuid = srcData.uuid[i];
-                    if (destData.data.indexOf(uuid) >= 0) {
-                        bFound = true;
-                        return bFound; // 源UUID数组只要有一个被引用，即代表源文件被引用了，无需继续查找
-                    }
-                }
-            }
-        }
-        return bFound;
-    },
-
-    // 根据源文件名在目标资源中查找
-    // 主要是搜索代码中动态调用的.prefab、.anim
-    findAssetByName(srcPath, srcData) {
-        let bFound = false;
-        if (!srcPath || !srcData) {
-            return bFound;
-        }
-        for (let [destPath, destData] of this.destMap.entries()) {
-            // 目标资源必须是代码文件
-            if (srcPath == destPath || ResType.Code !== destData.type) { 
-                continue;
-            }
-            if (!!srcData && !!srcData.name && srcData.name.length > 0) {
-                if (destData.data.indexOf(srcData.name) >= 0) {
-                    bFound = true;
-                    break;
-                }
-            }
-        }
-        return bFound;
-    },
-
-    // 递归查找指定目录下所有资源
-    lookupAssetDir(srcDir, callback) {
-        if (!srcDir || !fs.existsSync(srcDir)) {    
-            console.error("AssetCleaner: invalid srcDir=" + srcDir);
-            return;
-        }
-
-        let files = fs.readdirSync(srcDir);
-        for (let i = 0, len = files.length; i < len; i++) {
-            let file = files[i];
-            let curPath = path.join(srcDir, file);
-
-            // 如果该文件已处理过则直接跳过
-            if (this.handleMap.has(curPath)) {
-                continue;
-            }
-
-            let stats = fs.statSync(curPath);
-            if (stats.isDirectory()) {
-                this.lookupAssetDir(curPath);
-                continue;
-            }
-
-            let data = null;
-            let uuid = [];
-            let pathObj = path.parse(curPath);
-            // Sprine资源
-            if (curPath.includes('.json.meta')) {
-                data = FileHelper.getFileString(curPath);
-                this.destMap.set(curPath, { data, type: ResType.Spine });
-                continue
-            }
-            // 针对各类型文件做相应处理
-            switch (pathObj.ext) {
-                case '.js':
-                case '.ts':
-                    data = FileHelper.getFileString(curPath);
-                    this.destMap.set(curPath, { data, type:ResType.Code });
-                    break;
-
-                case '.prefab':
-                    uuid = this.getFileUUID(curPath, pathObj, ResType.Prefab);
-                    data = { uuid, type:ResType.Prefab, size:stats.size, name:'' };
-                    if (curPath.indexOf(this.resourcesDir) >= 0) {
-                        data.name = pathObj.name; // resources下文件需按文件名在代码中查找
-                    }
-                    this.sourceMap.set(curPath, data);
-                    
-                    data = FileHelper.getFileString(curPath);
-                    this.destMap.set(curPath, { data, type:ResType.Prefab });
-                    break;
-
-                case '.anim':
-                    if (curPath.indexOf(this.resourcesDir) < 0) { // 暂时排除resources下.anim
-                        uuid = this.getFileUUID(curPath, pathObj, ResType.Anim);
-                        this.sourceMap.set(curPath, { uuid, type:ResType.Anim, size:stats.size });
-                    }
-
-                    data = FileHelper.getFileString(curPath);
-                    this.destMap.set(curPath, { data, type:ResType.Anim });
-                    break;
-
-                case '.fire':
-                    data = FileHelper.getFileString(curPath);
-                    this.destMap.set(curPath, { data, type:ResType.Fire });
-                    break;
-                    
-                case '.png':
-                case '.jpg':
-                case '.webp':
-                    if (curPath.indexOf(this.resourcesDir) >= 0) { // 暂时不处理resources下图片
-                        break;
-                    }
-                    let type = this.getImageType(curPath, pathObj);
-                    uuid = this.getFileUUID(curPath, pathObj, type);
-                    type === ResType.Image && this.sourceMap.set(curPath, { uuid, type:type, size:stats.size });
-                    break;
-
-                default:
-                    break;
-            }
-        }
-    },
-
+   
     // 根据同一目录下该图片同名文件的不同扩展名来判断图片类型（.plist、.json、labelatlas、fnt）
     getImageType(srcPath, pathObj) {
         let type = ResType.Image;
@@ -376,10 +425,14 @@ let AssetCleaner = {
                 uuid = this.getRawUUIDFromMeta(destPath, pathObj.name);
                 break;
             case ResType.Spine:
-                destPath = path.join(pathObj.dir, pathObj.name) + '.json.meta';
+                destPath = path.join(pathObj.dir, pathObj.name) + '.meta';
                 uuid = this.getRawUUIDFromMeta(destPath);
                 break;
             case ResType.Prefab:
+                destPath = srcPath + '.meta';
+                uuid = this.getRawUUIDFromMeta(destPath);
+                break;
+            case ResType.Fnt:
                 destPath = srcPath + '.meta';
                 uuid = this.getRawUUIDFromMeta(destPath);
                 break;
@@ -392,6 +445,23 @@ let AssetCleaner = {
         return uuid;
     },
 
+    // 递归删除目录及其所有内容
+    deleteDirectoryRecursive(dirPath) {
+        if (fs.existsSync(dirPath)) {
+            fs.readdirSync(dirPath).forEach((file) => {
+                const curPath = path.join(dirPath, file);
+                if (fs.lstatSync(curPath).isDirectory()) {
+                    // 递归删除子目录
+                    this.deleteDirectoryRecursive(curPath);
+                } else {
+                    // 删除文件
+                    fs.unlinkSync(curPath);
+                }
+            });
+            // 删除空目录
+            fs.rmdirSync(dirPath);
+        }
+    }
 };
 
 module.exports = AssetCleaner;
